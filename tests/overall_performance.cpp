@@ -24,13 +24,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define MERGE_ROUND 20
-#define MERGE_IO_THRESHOLD 1.2
-#define NUM_INSERT_THREADS 10
-#define NUM_MERGE_THREADS 20
-#define NUM_DELETE_THREADS 1
-#define NUM_SEARCH_THREADS 32
-#define DeleteQPS 1000
+#define MERGE_ROUND 20            // 定义触发一次强制合并(Merge)的批次间隔
+#define MERGE_IO_THRESHOLD 1.2    // 定义触发合并的磁盘IO阈值比例(当前IO/基准IO > 1.2时合并)
+#define NUM_INSERT_THREADS 4      // 定义执行并发插入的线程数
+#define NUM_MERGE_THREADS 2       // 定义后台合并索引使用的线程数
+#define NUM_DELETE_THREADS 1      // 定义执行删除操作的线程数(这里仅用1个)
+#define NUM_SEARCH_THREADS 1      // 定义并发查询的线程数
+#define DeleteQPS 1000            // 定义预期的删除QPS
 
 int begin_time = 0;
 pipeann::Timer globalTimer;
@@ -232,7 +232,7 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
             std::string &save_path, const std::string &query_file, std::string &truthset_file, const int recall_at,
             std::vector<uint64_t> Lsearch, const unsigned beam_width, pipeann::Distance<T> *dist_cmp) {
   pipeann::IndexBuildParameters paras;
-  paras.set(0, L_disk, 384, 1.2, 128, true, beam_width);  // 128 threads for less contention.
+  paras.set(0, L_disk, 160, 1.2, 8, true, beam_width);  // 128 threads for less contention.
   std::vector<T> data_load;
   size_t dim{}, aligned_dim{};
 
@@ -247,6 +247,10 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
   aligned_dim = query_dim;
   pipeann::Metric metric = pipeann::Metric::L2;
   pipeann::DynamicSSDIndex<T, TagT> sync_index(paras, save_path, save_path + "_merge", dist_cmp, metric);
+  
+  // change start 索引加载测试
+  // return;
+  // change end
 
   std::cout << "Searching before inserts: " << std::endl;
 

@@ -63,7 +63,8 @@ namespace pipeann {
 
     void init_temporary_fields() {
       this->max_npts = npoints;
-      this->range = (max_node_len - data_dim * sizeof(T) - label_size) / sizeof(unsigned) - 1;
+      // this->range = (max_node_len - data_dim * sizeof(T) - label_size) / sizeof(unsigned) - 1;
+      this->range = (max_node_len - data_dim * sizeof(uint8_t) - 2 * sizeof(float)- label_size) / sizeof(unsigned) - 1;
       this->entry_point_id = static_cast<IdT>(entry_point);
       assert(entry_point_id == entry_point);
     }
@@ -151,6 +152,30 @@ namespace pipeann {
           labels((void *) ((char *) coords + meta.data_dim * sizeof(T) + (1 + meta.range) * sizeof(uint32_t))) {
     }
   };
+
+  // change start 添加LVQ DiskNode结构
+  // The index is stored as fixed-size LVQ DiskNodes (records) on disk.
+  // Each DiskNode contains: [vector (coords) | minval | step | nnbrs | nnbrs neighbor IDs | labels (maybe 0 length) ].
+  // This struct serves as a reference to a DiskNode<T> in the in-memory page-aligned buffer.
+  template<typename T>
+  struct LVQDiskNode{
+    uint8_t *coords;
+    float &minval;
+    float &step;
+    uint32_t &nnbrs;
+    uint32_t *nbrs;
+    void *labels;
+
+    LVQDiskNode<T>(char *page_buf, uint32_t loc, const SSDIndexMetadata<T> &meta)
+      : coords((uint8_t *) (page_buf + (meta.nnodes_per_sector == 0 ? 0 : (loc % meta.nnodes_per_sector) * meta.max_node_len))),
+        minval(*(float *) ((char *) coords + meta.data_dim * sizeof(uint8_t))),
+        step(*(float *) ((char *) coords + meta.data_dim * sizeof(uint8_t) + sizeof(float))),
+        nnbrs(*(uint32_t *) ((char *) coords + meta.data_dim * sizeof(uint8_t) + 2 * sizeof(float))),
+        nbrs((uint32_t *) ((char *) coords + meta.data_dim * sizeof(uint8_t) + 2 * sizeof(float) + sizeof(uint32_t))),
+        labels((void *) ((char *) coords + meta.data_dim * sizeof(uint8_t) + 2 * sizeof(float) + (1 + meta.range) * sizeof(uint32_t))) {
+    }
+  };
+  // change end
 
   template<typename T>
   struct QueryBuffer {

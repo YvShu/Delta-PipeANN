@@ -1,3 +1,10 @@
+/*
+ * @Author: Guyue
+ * @Date: 2026-04-15 11:22:55
+ * @LastEditTime: 2026-04-15 18:00:03
+ * @LastEditors: Guyue
+ * @FilePath: /Delta-PipeANN/include/nbr/nbr.h
+ */
 #ifndef NBR_H_
 #define NBR_H_
 
@@ -5,6 +12,7 @@
 #include "nbr/dummy_nbr.h"
 #include "nbr/pq_nbr.h"
 #include "nbr/rabitq_nbr.h"
+#include "nbr/lvq_nbr.h"
 
 namespace pipeann {
   /* Neighbor handler is used to compute distances between query and graph neighbors. */
@@ -23,6 +31,11 @@ namespace pipeann {
     } else if (nbr_type == "rabitq5") {
       return new RaBitQNeighbor<T, 5>(metric);
     }
+    // change start 添加lvq量化方法
+    else if (nbr_type == "lvq") {
+      return new LVQNeighbor<T>(metric);
+    }
+    // change end
     return nullptr;
   }
 }  // namespace pipeann

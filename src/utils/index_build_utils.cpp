@@ -317,7 +317,10 @@ namespace pipeann {
     uint64_t label_size = (label != nullptr) ? label->label_size() : 0;
 
     // Compute disk layout parameters and build metadata
-    uint64_t max_node_len = ((uint64_t) width + 1) * sizeof(uint32_t) + ndims * sizeof(T) + label_size;
+    // uint64_t max_node_len = ((uint64_t) width + 1) * sizeof(uint32_t) + ndims * sizeof(T) + label_size;
+    // change start lvq量化后的数据布局,T应为uint8
+    uint64_t max_node_len = ((uint64_t) width + 1) * sizeof(uint32_t) + ndims * sizeof(uint8_t) + 2 * sizeof(float) + label_size;
+    // change end
     uint64_t nnodes_per_sector = SECTOR_LEN / max_node_len;  // 0 if max_node_len > SECTOR_LEN
     SSDIndexMetadata<T> meta(npts, ndims, medoid, max_node_len, nnodes_per_sector, label_size);
     meta.print();
@@ -334,21 +337,42 @@ namespace pipeann {
     memset(sector_buf.get(), 0, SECTOR_LEN);
     diskann_writer.write(sector_buf.get(), SECTOR_LEN);
 
-    // Helper lambda to create DiskNode from buffer
-    auto disk_node_at = [&](char *buf, uint32_t loc) -> DiskNode<T> { return DiskNode<T>(buf, loc, meta); };
+    // change start 将索引 + 原始向量以lvq量化向量的形式写入SSD
+    auto disk_node_at = [&](char *buf, uint32_t loc) -> LVQDiskNode<T> { return LVQDiskNode<T>(buf, loc, meta); };
 
-    // Write all nodes
     for (uint64_t cur_node_id = 0; cur_node_id < meta.npoints;) {
       memset(sector_buf.get(), 0, bytes_per_write);
 
+      // 每次处理一个扇区的数据
       uint64_t nodes_this_write = std::min(nodes_per_write, meta.npoints - cur_node_id);
       for (uint64_t i = 0; i < nodes_this_write; i++, cur_node_id++) {
-        DiskNode<T> node = disk_node_at(sector_buf.get(), cur_node_id);
+        LVQDiskNode<T> node = disk_node_at(sector_buf.get(), cur_node_id);
 
-        // Read coords directly into DiskNode
-        base_reader.read((char *) node.coords, meta.data_dim * sizeof(T));
+        // 1、读取数据文件
+        std::vector<float> coords(ndims);
+        base_reader.read((char *) coords.data(), meta.data_dim * sizeof(T));
+        
+        // 对数据进行量化，得到lvq向量、最小值、步长
+        std::vector<uint8_t> out(meta.data_dim);
+        float min_val = coords[0];
+        float max_val = coords[0];
+        for (size_t d = 1; d < meta.data_dim; ++d) {
+            if (coords[d] < min_val) min_val = coords[d];
+            if (coords[d] > max_val) max_val = coords[d];          
+        }
+        float step = 0.0f;
+        step = (max_val - min_val) / 255.0f;
+        for (size_t d = 0; d < meta.data_dim; ++d)
+        {
+            int p_val = std::round((coords[d] - min_val) / step);
+            p_val = std::max(0, std::min(255, p_val));
+            out[d] = static_cast<uint8_t>(p_val);
+        }
+        memcpy(out.data(), node.coords, meta.data_dim * sizeof(uint8_t));
+        node.minval = min_val;
+        node.step = step;
 
-        // Read nnbrs from vamana index
+        // 2、读取Vamana邻居数量
         uint32_t nnbrs_read;
         vamana_reader.read((char *) &nnbrs_read, sizeof(uint32_t));
         if (nnbrs_read == 0) {
@@ -356,7 +380,7 @@ namespace pipeann {
           exit(-1);
         }
 
-        // Read neighbors directly into DiskNode (truncate if exceeds width)
+        // 3、读取邻居节点
         uint32_t nnbrs_to_write = std::min(nnbrs_read, width);
         vamana_reader.read((char *) node.nbrs, nnbrs_to_write * sizeof(uint32_t));
         if (nnbrs_read > width) {
@@ -375,6 +399,49 @@ namespace pipeann {
       }
     }
     diskann_writer.close();
+    // change end
+
+    // // Helper lambda to create DiskNode from buffer
+    // auto disk_node_at = [&](char *buf, uint32_t loc) -> DiskNode<T> { return DiskNode<T>(buf, loc, meta); };
+
+    // // Write all nodes
+    // for (uint64_t cur_node_id = 0; cur_node_id < meta.npoints;) {
+    //   memset(sector_buf.get(), 0, bytes_per_write);
+
+    //   uint64_t nodes_this_write = std::min(nodes_per_write, meta.npoints - cur_node_id);
+    //   for (uint64_t i = 0; i < nodes_this_write; i++, cur_node_id++) {
+    //     DiskNode<T> node = disk_node_at(sector_buf.get(), cur_node_id);
+
+    //     // Read coords directly into DiskNode
+    //     base_reader.read((char *) node.coords, meta.data_dim * sizeof(T));
+
+    //     // Read nnbrs from vamana index
+    //     uint32_t nnbrs_read;
+    //     vamana_reader.read((char *) &nnbrs_read, sizeof(uint32_t));
+    //     if (nnbrs_read == 0) {
+    //       LOG(ERROR) << "Found point with no out-neighbors; Point#: " << cur_node_id;
+    //       exit(-1);
+    //     }
+
+    //     // Read neighbors directly into DiskNode (truncate if exceeds width)
+    //     uint32_t nnbrs_to_write = std::min(nnbrs_read, width);
+    //     vamana_reader.read((char *) node.nbrs, nnbrs_to_write * sizeof(uint32_t));
+    //     if (nnbrs_read > width) {
+    //       vamana_reader.seekg((nnbrs_read - width) * sizeof(uint32_t), vamana_reader.cur);
+    //     }
+    //     node.nnbrs = nnbrs_to_write;
+
+    //     if (label_size > 0) {
+    //       label->write(static_cast<uint32_t>(cur_node_id), node.labels);
+    //     }
+    //   }
+
+    //   diskann_writer.write(sector_buf.get(), bytes_per_write);
+    //   if (cur_node_id % 100000 < nodes_per_write) {
+    //     LOG(INFO) << "Nodes written: " << cur_node_id << "/" << meta.npoints;
+    //   }
+    // }
+    // diskann_writer.close();
 
     // Handle tags file
     bool tags_enabled = !tag_file.empty();
@@ -422,14 +489,17 @@ namespace pipeann {
       normalized_file_path = std::string(indexFilePath) + "_data.normalized.bin";
       normalize_data_file<T>(dataFilePath, normalized_file_path);
     }
-
+    
     auto s = std::chrono::high_resolution_clock::now();
-    nbr_handler->build(index_prefix_path, normalized_file_path, bytes_per_nbr);
+
+    // change start 替换为LVQ量化，无需构建码本和压缩向量
+    // nbr_handler->build(index_prefix_path, normalized_file_path, bytes_per_nbr);
+    // change end
 
     auto start = std::chrono::high_resolution_clock::now();
-    auto p_val = nbr_handler->get_sample_p();
-    pipeann::build_merged_vamana_index<T>(normalized_file_path, _compareMetric, L, R, p_val, M, mem_index_path,
-                                          medoids_path, centroids_path, tag_file);
+    // auto p_val = nbr_handler->get_sample_p();
+    // pipeann::build_merged_vamana_index<T>(normalized_file_path, _compareMetric, L, R, p_val, M, mem_index_path,
+    //                                       medoids_path, centroids_path, tag_file);
     auto end = std::chrono::high_resolution_clock::now();
     LOG(INFO) << "Vamana index built in: " << std::chrono::duration<double>(end - start).count() << "s.";
 
@@ -440,17 +510,17 @@ namespace pipeann {
       pipeann::create_disk_layout<T, TagT>(mem_index_path, normalized_file_path, tag_filename, disk_index_path, label);
     }
 
-    LOG(INFO) << "Deleting memory index file: " << mem_index_path;
-    std::remove(mem_index_path.c_str());
-    // TODO: This is poor design. The decision to add the ".data" prefix
-    // is taken by build_vamana_index. So, we shouldn't repeate it here.
-    // Checking to see if we can merge the data and index into one file.
-    std::remove((mem_index_path + ".data").c_str());
-    if (normalized_file_path != dataFilePath) {
-      // then we created a normalized vector file. Delete it.
-      LOG(INFO) << "Deleting normalized vector file: " << normalized_file_path;
-      std::remove(normalized_file_path.c_str());
-    }
+    // LOG(INFO) << "Deleting memory index file: " << mem_index_path;
+    // std::remove(mem_index_path.c_str());
+    // // TODO: This is poor design. The decision to add the ".data" prefix
+    // // is taken by build_vamana_index. So, we shouldn't repeate it here.
+    // // Checking to see if we can merge the data and index into one file.
+    // std::remove((mem_index_path + ".data").c_str());
+    // if (normalized_file_path != dataFilePath) {
+    //   // then we created a normalized vector file. Delete it.
+    //   LOG(INFO) << "Deleting normalized vector file: " << normalized_file_path;
+    //   std::remove(normalized_file_path.c_str());
+    // }
 
     auto e = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> diff = e - s;

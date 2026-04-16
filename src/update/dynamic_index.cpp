@@ -53,7 +53,10 @@ namespace pipeann {
     _dist_comp = dist;
 
     reader.reset(new LinuxAlignedFileReader());
-    AbstractNeighbor<T> *nbr_handler = new PQNeighbor<T>(this->_dist_metric);
+    // change start 邻居处理器不再使用PQ量化器
+    // AbstractNeighbor<T> *nbr_handler = new PQNeighbor<T>(this->_dist_metric);
+    AbstractNeighbor<T> *nbr_handler = new LVQNeighbor<T>(this->_dist_metric);
+    // change end
     _disk_index = new pipeann::SSDIndex<T, TagT>(this->_dist_metric, reader, nbr_handler, true, &_paras_disk);
 
 #ifndef NO_POLLUTE_ORIGINAL
