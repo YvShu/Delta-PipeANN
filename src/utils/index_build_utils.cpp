@@ -368,7 +368,7 @@ namespace pipeann {
             p_val = std::max(0, std::min(255, p_val));
             out[d] = static_cast<uint8_t>(p_val);
         }
-        memcpy(out.data(), node.coords, meta.data_dim * sizeof(uint8_t));
+        memcpy(node.coords, out.data(), meta.data_dim * sizeof(uint8_t));
         node.minval = min_val;
         node.step = step;
 

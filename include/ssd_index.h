@@ -49,6 +49,12 @@ namespace pipeann {
       return DiskNode<T>(page_buf, loc, meta_);
     }
 
+    // change start 添加LVQDiskANN节点的读取
+    inline LVQDiskNode<T> lvqnode_from_page(char *page_buf, uint32_t loc) {
+      return LVQDiskNode<T>(page_buf, loc, meta_);
+    }
+    // change end
+
     // Size of the data region in a DiskNode.
     inline uint64_t node_label_size() const {
       return meta_.label_size;
@@ -163,6 +169,22 @@ namespace pipeann {
                        TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
                        AbstractSelector *selector = nullptr, const void *filter_data = nullptr,
                        const uint64_t relaxed_monotonicity_l = 0);
+    
+    // change start 添加纯SSD盲搜算法
+    size_t page_search_blind(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
+                             TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr);
+
+    size_t page_search_blind1(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
+                              TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr);
+
+    size_t page_search_blind2(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
+                              TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr);
+
+    size_t pipe_search_blind(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
+                             TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
+                             AbstractSelector *selector = nullptr, const void *filter_data = nullptr,
+                             const uint64_t relaxed_monotonicity_l = 0);
+    // change end
 
     int insert_in_place(const T *point, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set = nullptr);
 

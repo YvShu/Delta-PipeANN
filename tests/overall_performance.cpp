@@ -29,7 +29,7 @@
 #define NUM_INSERT_THREADS 4      // 定义执行并发插入的线程数
 #define NUM_MERGE_THREADS 2       // 定义后台合并索引使用的线程数
 #define NUM_DELETE_THREADS 1      // 定义执行删除操作的线程数(这里仅用1个)
-#define NUM_SEARCH_THREADS 1      // 定义并发查询的线程数
+#define NUM_SEARCH_THREADS 2      // 定义并发查询的线程数
 #define DeleteQPS 1000            // 定义预期的删除QPS
 
 int begin_time = 0;
@@ -267,6 +267,10 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
                        false, true, diskio);
     ref_diskio.push_back(diskio);
   }
+
+  // change start 索引搜索测试
+  return;
+  // change end
 
   int batch = 100;
   int inMemorySize = 0;

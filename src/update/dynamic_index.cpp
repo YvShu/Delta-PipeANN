@@ -115,16 +115,21 @@ namespace pipeann {
     std::vector<float> result_distances(4096);
     auto *deletion_set = &deletion_sets[active_delete_set];
     size_t n = 0;
-    if (search_mode == BEAM_SEARCH) {
-      n = _disk_index->beam_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                   beam_width, stats, deletion_set, dyn_search_l);
-    } else if (search_mode == PAGE_SEARCH) {
-      n = _disk_index->page_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                   beam_width, stats);
-    } else if (search_mode == PIPE_SEARCH) {
-      n = _disk_index->pipe_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                   beam_width, stats);
-    }
+
+    // change start 使用纯SSD的搜索方法
+    n = _disk_index->page_search_blind2(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+                                        beam_width, stats);
+    // change end
+    // if (search_mode == BEAM_SEARCH) {
+    //   n = _disk_index->beam_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                beam_width, stats, deletion_set, dyn_search_l);
+    // } else if (search_mode == PAGE_SEARCH) {
+    //   n = _disk_index->page_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                beam_width, stats);
+    // } else if (search_mode == PIPE_SEARCH) {
+    //   n = _disk_index->pipe_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                beam_width, stats);
+    // }
 
     std::vector<std::pair<TagT, float>> best_vec;  // <tag, distance>
     for (size_t i = 0; i < n; i++) {
