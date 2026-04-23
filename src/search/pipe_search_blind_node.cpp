@@ -1,18 +1,18 @@
 /*
  * @Author: Guyue
  * @Date: 2026-04-21 10:25:44
- * @LastEditTime: 2026-04-23 10:06:01
+ * @LastEditTime: 2026-04-23 10:19:22
  * @LastEditors: Guyue
- * @FilePath: /Delta-PipeANN/src/search/pipe_search_blind.cpp
+ * @FilePath: /Delta-PipeANN/src/search/pipe_search_blind_node.cpp
  */
 #include "aligned_file_reader.h"
 #include "utils/libcuckoo/cuckoohash_map.hh"
 #include "ssd_index.h"
 #include <malloc.h>
 #include <algorithm>
-// #ifndef USE_AIO
-// #include "liburing.h"
-// #endif
+#ifndef USE_AIO
+#include "liburing.h"
+#endif
 
 #include <omp.h>
 #include <chrono>
@@ -25,7 +25,6 @@
 
 #include <unistd.h>
 #include <sys/syscall.h>
-#include "linux_aligned_file_reader.h"
 
 namespace pipeann {
   // 候选队列结构体：管理未进行评估的读取操作
@@ -70,18 +69,11 @@ namespace pipeann {
   };
 
   template<typename T, typename TagT>
-  void SSDIndex<T, TagT>::do_pipe_search_blind(const T *query1, uint32_t mem_L, uint32_t l_search, const uint32_t beam_width,
-                                               std::vector<Neighbor> &expanded_nodes_info,
-                                               tsl::robin_map<uint32_t, T *> *coord_map, QueryStats *stats,
-                                               tsl::robin_set<uint32_t> *exclude_nodes /* tags */, bool dyn_search_l,
-                                               std::vector<uint64_t> *passthrough_page_ref,
-                                               QueryBuffer<T> * passthrough_data) {
-    QueryBuffer<T> *query_buf;
-    if (passthrough_data != nullptr) {
-      query_buf = passthrough_data;
-    } else {
-      query_buf = pop_query_buf(query1);
-    }
+  size_t SSDIndex<T, TagT>::pipe_search_blind_node(const T *query1, const uint64_t k_search, const uint32_t mem_L,
+                                                   const uint64_t l_search, TagT *res_tags, float *distances,
+                                                   const uint64_t beam_width, QueryStats *stats, AbstractSelector *selector,
+                                                   const void *filter_data, const uint64_t relaxed_monotonicity_l) {
+    QueryBuffer<T> *query_buf = pop_query_buf(query1);
     void *ctx = reader->get_ctx();
 
     if (beam_width > MAX_N_SECTOR_READS) {
@@ -97,25 +89,21 @@ namespace pipeann {
     char *sector_scratch = query_buf->sector_scratch;
 
     Timer query_timer;
-    std::vector<Neighbor> retset;                                 // 记录已精确计算的top l_search节点
-    std::vector<Neighbor> &full_retset = expanded_nodes_info;     // 记录已精确计算过的节点
-    std::priority_queue<Candidate> read_queue;                    // 读取队列
-    std::queue<io_t> on_flight_ios;                               // 记录在途IO队列
-    std::priority_queue<node_buf<T>> node_buf_queue;              // 暂存从磁盘读取成功、但还尚未被处理的页面
+    std::vector<Neighbor> retset;                 // 记录已精确计算的top l_search节点
+    std::vector<Neighbor> full_retset;            // 记录已精确计算过的节点
+    std::priority_queue<Candidate> read_queue;    // 读取队列
+    std::queue<io_t> on_flight_ios;               // 记录在途IO队列
+    std::priority_queue<node_buf<T>> node_buf_queue; // 暂存从磁盘读取成功、但还尚未被处理的页面
     auto &visited = *(query_buf->visited);
     retset.reserve(l_search);
     full_retset.reserve(l_search * 10);
 
     unsigned cur_list_size = 0;
     uint64_t n_computes = 0;
-    uint64_t coord_buf_idx = 0;
-
-    std::vector<uint64_t> new_page_ref{};
-    std::vector<uint64_t> &page_ref = passthrough_page_ref ? *passthrough_page_ref : new_page_ref;
 
     // Helper 计算从磁盘取回的向量的距离
     auto compute_dists_and_push = [&](const LVQDiskNode<T> &node, const unsigned id) -> float {
-      T *node_fp_coords_copy = data_buf + (coord_buf_idx * aligned_dim);;
+      T *node_fp_coords_copy = data_buf;
 
       std::vector<float> point(meta_.data_dim);
       for (size_t i = 0; i < meta_.data_dim; ++i) {
@@ -125,18 +113,6 @@ namespace pipeann {
       memcpy(node_fp_coords_copy, point.data(), meta_.data_dim * sizeof(T));
       float cur_dist = dist_cmp->compare(query, node_fp_coords_copy, (unsigned) aligned_dim);
       
-      if (coord_map != nullptr) {
-        // if (unlikely(coord_buf == nullptr || coord_buf_idx > 4096)) {
-        //   LOG(ERROR) << "Please allocate larger coord_buf.";
-        //   crash();
-        // }
-        // T *coord_ptr = coord_buf + coord_buf_idx * aligned_dim;
-        // memcpy(coord_ptr, node_fp_coords_copy, meta_.data_dim * sizeof(T));
-        coord_map->insert(std::make_pair(id, node_fp_coords_copy));
-        // coord_buf_idx++;
-      }
-      coord_buf_idx++;
-
       full_retset.push_back(Neighbor(id, cur_dist, true));
       return cur_dist;
     };
@@ -170,22 +146,12 @@ namespace pipeann {
       auto &req = query_buf->reqs[cur_buf_idx];
 
       // 装配IORequest并下发读取请求
-      std::vector<IORequest> reqs;
       req = IORequest(static_cast<uint64_t>(page_id) * SECTOR_LEN, size_per_io, buf, 
                       u_loc_offset(loc), meta_.max_node_len, sector_scratch);
-      // reader->send_read_no_alloc(req, ctx);
-      reqs.push_back(req);
-      reader->read_alloc(reqs, ctx, &page_ref);
-
-      std::vector<char> node(meta_.max_node_len);
-      memcpy(node.data(), 
-             (char *) buf + (meta_.nnodes_per_sector == 0 ? 0 : (loc % meta_.nnodes_per_sector) * meta_.max_node_len), 
-             meta_.max_node_len);
-      node_buf_queue.push({item.id, item.distance, node});
-      this->unlock_idx(idx_lock_table, item.id);
+      reader->send_read_no_alloc(req, ctx);
 
       // 记录到在途IO队列
-      // on_flight_ios.push(io_t{item, page_id, loc, &req});
+      on_flight_ios.push(io_t{item, page_id, loc, &req});
       cur_buf_idx = (cur_buf_idx + 1) % MAX_N_SECTOR_READS;
 
       if (stats != nullptr) {
@@ -199,9 +165,9 @@ namespace pipeann {
       unsigned n_sent = 0;
       while (!read_queue.empty() && n_sent < n) {
         Candidate cand = read_queue.top();
+        read_queue.pop();
         Neighbor item(cand.id, cand.dist, false);
         send_read_req(item);
-        read_queue.pop();
         n_sent++;
       }
       return n_sent != 0;
@@ -214,7 +180,6 @@ namespace pipeann {
       while (!on_flight_ios.empty() && on_flight_ios.front().finished()) {
         io_t &io = on_flight_ios.front();
         // LVQDiskNode<T> node = lvqnode_from_page((char *) io.read_req->buf, io.loc);
-
         std::vector<char> node(meta_.max_node_len);
         memcpy(node.data(), 
                (char *) io.read_req->buf + (meta_.nnodes_per_sector == 0 ? 0 : (io.loc % meta_.nnodes_per_sector) * meta_.max_node_len), 
@@ -231,7 +196,6 @@ namespace pipeann {
       unsigned n_calc = 0;
       while (!node_buf_queue.empty() && n_calc < n) {
         auto [id, dist, node_buf] = node_buf_queue.top();
-
         LVQDiskNode<T> node = lvqnode_from_page(node_buf.data(), 0);
         float cur_dist = compute_dists_and_push(node, id);
         process_and_push_nbrs(node, id, cur_dist);
@@ -250,7 +214,7 @@ namespace pipeann {
     }
     if (mem_L) {
     } else {
-      retset[cur_list_size++] = Neighbor(meta_.entry_point_id, std::numeric_limits<float>::max(), false);
+      retset[cur_list_size++] = Neighbor(meta_.entry_point_id, 0.0f, false);
       visited.insert(meta_.entry_point_id);
       read_queue.push({meta_.entry_point_id, 0.0f});
     }
@@ -258,23 +222,23 @@ namespace pipeann {
 
     send_best_read_req(beam_width - on_flight_ios.size());
 
-    // while (!read_queue.empty() || !on_flight_ios.empty()) {
-    while (n_computes < 3000 && (!read_queue.empty() || !on_flight_ios.empty())) {
-      // pool_all();
+    while (n_computes < 4000 && (!read_queue.empty() || !on_flight_ios.empty())) {
+      pool_all();
       int64_t to_send = beam_width - on_flight_ios.size();
       if (to_send > 0) {
         send_best_read_req(to_send);
       }
       calc_best_node(5);
     }
-
-    while (!on_flight_ios.empty()) {
+    
+    while (!on_flight_ios.empty() && !node_buf_queue.empty()) {
       reader->poll_all(ctx);
       while (!on_flight_ios.empty() && on_flight_ios.front().finished()) {
         io_t &io = on_flight_ios.front();
         this->unlock_idx(idx_lock_table, io.nbr.id);
         on_flight_ios.pop();
       }
+      calc_best_node(5);
     }
 
     auto cpu2_ed = std::chrono::high_resolution_clock::now();
@@ -286,48 +250,24 @@ namespace pipeann {
     std::sort(full_retset.begin(), full_retset.end(),
               [](const Neighbor &left, const Neighbor &right) { return left < right; });
 
-    // uint64_t t = 0;
-    // for (uint64_t i = 0; i < full_retset.size() && t < k_search; i++) {
-    //   if (i > 0 && full_retset[i].id == full_retset[i - 1].id) {
-    //     continue;
-    //   }
-    //   res_tags[t] = id2tag(full_retset[i].id);
-    //   if (distances != nullptr) {
-    //     distances[t] = full_retset[i].distance;
-    //   }
-    //   t++;
-    // }
-    
-    if (passthrough_page_ref == nullptr) {
-      reader->deref(&page_ref, ctx);
+    uint64_t t = 0;
+    for (uint64_t i = 0; i < full_retset.size() && t < k_search; i++) {
+      if (i > 0 && full_retset[i].id == full_retset[i - 1].id) {
+        continue;
+      }
+      res_tags[t] = id2tag(full_retset[i].id);
+      if (distances != nullptr) {
+        distances[t] = full_retset[i].distance;
+      }
+      t++;
     }
-
+    
     push_query_buf(query_buf);
 
     if (stats != nullptr) {
       stats->total_us = (double) query_timer.elapsed();
     }
-
-    // return t;
-  }
-
-  template<typename T, typename TagT>
-  size_t SSDIndex<T, TagT>::pipe_search_blind(const T *query, const uint64_t k_search, const uint32_t mem_L,
-                                              const uint64_t l_search, TagT *res_tags, float *distances,
-                                              const uint64_t beam_width, QueryStats *stats,
-                                              tsl::robin_set<uint32_t> *deleted_nodes, bool dyn_search_l) {
-    // iterate to fixed point
-    std::shared_lock lk(merge_lock);
-    std::vector<Neighbor> expanded_nodes_info;
-    this->do_pipe_search_blind(query, mem_L, (uint32_t) l_search, (uint32_t) beam_width, expanded_nodes_info, nullptr,
-                               stats, deleted_nodes, dyn_search_l);
-    uint64_t res_count = 0;
-    for (uint32_t i = 0; i < l_search && res_count < k_search && i < expanded_nodes_info.size(); i++) {
-      res_tags[res_count] = id2tag(expanded_nodes_info[i].id);
-      distances[res_count] = expanded_nodes_info[i].distance;
-      res_count++;
-    }
-    return res_count;
+    return t;
   }
 
   template class SSDIndex<float>;

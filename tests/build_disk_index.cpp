@@ -1,3 +1,10 @@
+/*
+ * @Author: Guyue
+ * @Date: 2026-04-15 11:22:55
+ * @LastEditTime: 2026-04-20 09:51:30
+ * @LastEditors: Guyue
+ * @FilePath: /Delta-PipeANN/tests/build_disk_index.cpp
+ */
 #include <cstdint>
 #include "distance.h"
 #include "nbr/nbr.h"
@@ -37,7 +44,6 @@ int main(int argc, char **argv) {
 
     if (std::string(argv[1]) == std::string("float")) {
       pipeann::AbstractNeighbor<float> *nbr_handler = pipeann::get_nbr_handler<float>(m, nbr_type);
-
       pipeann::build_disk_index<float>(argv[2], argv[3], std::stoi(argv[4]), std::stoi(argv[5]), std::stoi(argv[7]),
                                        std::stoi(argv[8]), std::stoi(argv[6]), m, nullptr, nbr_handler, label);
     } else if (std::string(argv[1]) == std::string("int8")) {

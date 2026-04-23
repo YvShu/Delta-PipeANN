@@ -1,7 +1,7 @@
 /*
  * @Author: Guyue
- * @Date: 2026-04-16 16:51:55
- * @LastEditTime: 2026-04-16 19:40:50
+ * @Date: 2026-04-17 00:02:38
+ * @LastEditTime: 2026-04-20 14:43:34
  * @LastEditors: Guyue
  * @FilePath: /Delta-PipeANN/src/search/page_search_blind.cpp
  */
@@ -10,6 +10,7 @@
 #include "ssd_index.h"
 #include <malloc.h>
 #include <algorithm>
+#include <queue>
 
 #include <omp.h>
 #include <chrono>
@@ -28,19 +29,29 @@
 #include "linux_aligned_file_reader.h"
 
 namespace pipeann {
+  // 用于纯SSD盲搜的读取候选队列结构
+  struct Candidate {
+    unsigned id;
+    float parent_dist;
+    // 构造最小堆，使得父节点距离最小(最有希望)的节点被优先读取
+    bool operator<(const Candidate& other) const {
+      return parent_dist > other.parent_dist;
+    }
+  };
+  
   template<typename T, typename TagT>
   size_t SSDIndex<T, TagT>::page_search_blind(const T *query1, const uint64_t k_search, const uint32_t mem_L,
                                               const uint64_t l_search, TagT *res_tags, float *distances,
                                               const uint64_t beam_width, QueryStats *stats) {
     QueryBuffer<T> *query_buf = pop_query_buf(query1);
     void *ctx = reader->get_ctx();
-
+    
     if (beam_width > MAX_N_SECTOR_READS) {
       LOG(ERROR) << "Beamwidth can not be higher than MAX_N_SECTOR_READS";
       crash();
     }
     const T *query = query_buf->aligned_query_T;
-   
+
     // reset query
     query_buf->reset();
 
@@ -53,17 +64,20 @@ namespace pipeann {
     uint64_t &sector_scratch_idx = query_buf->sector_idx;
 
     Timer query_timer, io_timer, cpu_timer;
-    std::vector<Neighbor> retset(4096);     // candidate pool for beam search
+    // retset 仅保存精确评估过距离的节点
+    std::vector<Neighbor> retset(4096);
     tsl::robin_set<uint64_t> &visited = *(query_buf->visited);
     tsl::robin_set<unsigned> &page_visited = *(query_buf->page_visited);
     unsigned cur_list_size = 0;
 
-    std::vector<Neighbor> full_retset;      // stores all exactly computed distances
+    std::vector<Neighbor> full_retset;
     full_retset.reserve(4096);
 
-    // Helper:compute dist between query and a node
-    // update retset (if present) and append to full_retset
-    auto compute_dists_and_update = [&](const LVQDiskNode<T> &node, const unsigned id) -> float {
+    // 待读队列
+    std::priority_queue<Candidate> read_queue;
+
+    // Helper Lambda 1：计算确切距离并存入全量返回集合
+    auto compute_dists_and_push = [&](const LVQDiskNode<T> &node, const unsigned id) -> float {
       T *node_fp_coords_copy = data_buf;
 
       std::vector<float> point(meta_.data_dim);
@@ -72,119 +86,109 @@ namespace pipeann {
         point[i] = (static_cast<float>(q_val) * node.step) + node.minval;
       }
       memcpy(node_fp_coords_copy, point.data(), meta_.data_dim * sizeof(T));
-      
-      float dist = dist_cmp->compare(query, node_fp_coords_copy, (unsigned) aligned_dim);
 
-      // Add to full result set
-      full_retset.push_back(Neighbor(id, dist, true));
-
-      // Update retset if this id already exists (from a previous placeholder)
-      for (unsigned i = 0; i < cur_list_size; ++i) {
-        if (retset[i].id == id) {
-          retset[i].distance = dist;
-          retset[i].flag = true;
-          return dist;
-        }
-      }
-
-      // Not in retset yet, insert as a new candidate (should not happend often)
-      retset[cur_list_size] = Neighbor(id, dist, true);
-      ++cur_list_size;
-      return dist;
+      float cur_expanded_dist = dist_cmp->compare(query, node_fp_coords_copy, (unsigned) aligned_dim);
+      full_retset.push_back(Neighbor(id, cur_expanded_dist, true));
+      return cur_expanded_dist;
     };
 
-    // Helper:add neighbors of a node to retset as placeholders (distance = INF, flag = false)
-    // They will be exactly evaluated when their page is loaded
-    auto add_neighbors_as_placeholders = [&](LVQDiskNode<T> &node) -> unsigned {
-      unsigned *node_nbrs = node.nbrs;
-      unsigned nnbrs = node.nnbrs;
-      unsigned best_insert_pos = cur_list_size; // track smallest index where a neighbor is inserted
-      for (unsigned m = 0; m < nnbrs; ++m) {
-        unsigned nid = node_nbrs[m];
-        if (visited.find(nid) == visited.end()) {
-          visited.insert(nid);
-          // Insert placeholder with infinite distance
-          Neighbor nn(nid, std::numeric_limits<float>::max(), false);
-          auto r = InsertIntoPool(retset.data(), cur_list_size, nn);
-          if (cur_list_size < l_search)
-            ++cur_list_size;
-          if (r < best_insert_pos)
-            best_insert_pos = r;
+    // Helper Lambda 2：处理目标节点及其邻居，盲搜扩展
+    auto process_node_and_neighbors = [&](LVQDiskNode<T> &node, const unsigned id, float dist) {
+      Neighbor nn(id, dist, false);
+      // 插入有序的确切距离池中
+      auto r = InsertIntoPool(retset.data(), cur_list_size, nn);
+      if (cur_list_size < l_search) {
+        ++cur_list_size;
+      }
+
+      // 剪枝策略：只有当该节点能排进当前 top l_search 时，才值得去扩展它的邻居
+      if (r < l_search) {
+        unsigned *node_nbrs = node.nbrs;
+        unsigned nnbrs = node.nnbrs;
+        for (unsigned m = 0; m < nnbrs; ++m) {
+          unsigned nbor_id = node_nbrs[m];
+          if (visited.find(nbor_id) == visited.end()) {
+            visited.insert(nbor_id);
+            // 用父节点的精确距离作为探索子节点的启发式依据（Proxy Distance）
+            read_queue.push({nbor_id, dist});
+          }
         }
       }
-      return best_insert_pos;
     };
 
-    // stats
+    // stats.
     stats->io_us = 0;
     stats->cpu_us = 0;
 
-    // Initialize candidate pool with entry point(s)
+    // 初始化盲搜起始点
     if (mem_L) {
-
+      std::vector<unsigned> mem_tags(mem_L);
+      std::vector<float> mem_dists(mem_L);
+      mem_index_->search_with_tags(query, mem_L, mem_L, mem_tags.data(), mem_dists.data());
+      for (unsigned i = 0; i < std::min((unsigned)mem_L, (unsigned)l_search); ++i) {
+        unsigned ep_id = mem_tags[i];
+        if (visited.find(ep_id) == visited.end()) {
+          visited.insert(ep_id);
+          read_queue.push({ep_id, mem_dists[i]}); 
+        }
+      }
     } else {
       // Single entry point
-      retset[0].id = meta_.entry_point_id;
-      retset[0].distance = 0.0f;
-      retset[0].flag = false;
+      retset[cur_list_size].id = meta_.entry_point_id;
+      retset[cur_list_size].distance = 0.0f;
+      retset[cur_list_size++].flag = false;
       visited.insert(meta_.entry_point_id);
-      cur_list_size = 1;
+      read_queue.push({meta_.entry_point_id, 0.0f});
     }
 
-    std::sort(retset.begin(), retset.begin() + cur_list_size);
-
     unsigned num_ios = 0;
-    unsigned k = 0;
 
-    // cleared every iteration
+    // 每次迭代清空
     std::vector<unsigned> frontier;
     frontier.reserve(2 * beam_width);
-    // <node_id, page_id, page_layout, page_buf>
-    using page_fnhood_t = std::tuple<unsigned, unsigned, PageArr, char*>;
+    using page_fnhood_t = std::tuple<unsigned, unsigned, PageArr, char *>;  // <node_id, page_id, page_layout, page_buf>
     std::vector<page_fnhood_t> frontier_nhoods;
     frontier_nhoods.reserve(2 * beam_width);
     std::vector<IORequest> frontier_read_reqs;
     frontier_read_reqs.reserve(2 * beam_width);
 
-    // <node_id, page_id, page_layout>
-    using io_ss_t = std::tuple<unsigned, unsigned, PageArr>;
+    using io_ss_t = std::tuple<unsigned, unsigned, PageArr>;  // <node_id, page_id, page_layout>
     std::vector<io_ss_t> last_io_snapshot;
     last_io_snapshot.reserve(2 * beam_width);
 
     std::vector<char> last_pages(SECTOR_LEN * beam_width * 2);
 
-    // Main search loop
-    while (k < cur_list_size) {
-      unsigned nk = cur_list_size;
+    // Search on Disk
+    // 只要有待读节点，或者上一轮还留下缓存供overlap评估，就继续循环
+    while (!read_queue.empty() || !last_io_snapshot.empty()) {
       // clear iteration state
       frontier.clear();
       frontier_nhoods.clear();
       frontier_read_reqs.clear();
       sector_scratch_idx = 0;
 
-      // Select next beam of nodes whose pages will be read.
-      // Only nodes with flag == true (distance already computed) are eligible.
-      uint32_t marker = k;
-      uint32_t num_seen = 0;
+      // 1. 构建新的 frontier 队列
+      while (!read_queue.empty() && frontier.size() < beam_width) {
+        Candidate cand = read_queue.top();
+        read_queue.pop();
 
-      while (marker < cur_list_size && frontier.size() < beam_width && num_seen < beam_width) {
-        const unsigned pid = id2page(retset[marker].id);
+        const unsigned pid = id2page(cand.id);
         if (page_visited.find(pid) == page_visited.end()) {
-          num_seen++;
-          frontier.push_back(retset[marker].id);
+          frontier.push_back(cand.id);
           page_visited.insert(pid);
-          // Do not change flag here? it remains true.
         }
-        marker++;
       }
 
-      // Issue read requests for the selected frontier pages
+      if (frontier.empty() && last_io_snapshot.empty()) {
+        break; // 结束条件达到
+      }
+
+      // 2. 发起底层的磁盘异步 I/O 读取
       std::vector<uint32_t> locked, page_locked;
       int n_ios = 0;
       if (!frontier.empty()) {
-        if (stats != nullptr) {
+        if (stats != nullptr)
           stats->n_hops++;
-        }
 
         locked = this->lock_idx(idx_lock_table, kInvalidID, frontier, true);
         page_locked = this->lock_page_idx(page_idx_lock_table, kInvalidID, frontier, true);
@@ -197,8 +201,9 @@ namespace pipeann {
           page_fnhood_t fnhood = std::make_tuple(id, page_id, layout, buf);
           sector_scratch_idx++;
           frontier_nhoods.push_back(fnhood);
-          frontier_read_reqs.emplace_back(IORequest(page_id * SECTOR_LEN, size_per_io, buf, page_id * SECTOR_LEN, size_per_io));
-          
+          // 构建读取请求
+          frontier_read_reqs.emplace_back(
+              IORequest(page_id * SECTOR_LEN, size_per_io, buf, page_id * SECTOR_LEN, size_per_io));
           if (stats != nullptr) {
             stats->n_4k++;
             stats->n_ios++;
@@ -209,31 +214,30 @@ namespace pipeann {
         n_ios = reader->send_read_no_alloc(frontier_read_reqs, ctx);
       }
 
-      // --- PIPELINE: While I/O is an flight, process nodes from last round's pages ---
+      // 3. CPU OVERLAP：处理上一轮取回来的页面里附带的其他邻居节点
       auto cpu1_st = std::chrono::high_resolution_clock::now();
-      for (size_t i = 0; i < last_io_snapshot.size(); ++i) {
-        auto &[last_io_id, pid, page_layout] = last_io_snapshot[i];
-        char *sector_buf = last_pages.data() + i * SECTOR_LEN;
+      // for (size_t i = 0; i < last_io_snapshot.size(); ++i) {
+      //   auto &[last_io_id, pid, page_layout] = last_io_snapshot[i];
+      //   char *sector_buf = last_pages.data() + i * SECTOR_LEN;
 
-        // Process all other nodes in the same page (excluding the one that was the frontier)
-        for (unsigned j = 0; j < meta_.nnodes_per_sector; ++j) {
-          const unsigned id = page_layout[j];
-          if (id == last_io_id || id == kAllocatedID || id == kInvalidID) {
-            continue;
-          }
-          LVQDiskNode<T> node = lvqnode_from_page(sector_buf, j);
-          compute_dists_and_update(node, id);
-          unsigned best_nbor_pos = add_neighbors_as_placeholders(node);
-          if (best_nbor_pos < nk)
-            nk = best_nbor_pos;
-        }
-      }
-
+      //   for (unsigned j = 0; j < meta_.nnodes_per_sector; ++j) {
+      //     const unsigned id = page_layout[j];
+      //     // 剔除上一轮已经处理过的主目标节点和非法节点
+      //     if (id == last_io_id || id == kAllocatedID || id == kInvalidID) {
+      //       continue;
+      //     }
+      //     LVQDiskNode<T> node = lvqnode_from_page(sector_buf, j);
+      //     float dist = compute_dists_and_push(node, id);
+          
+      //     // 以纯盲搜方式进行处理（提取邻居、更新队列）
+      //     process_node_and_neighbors(node, id, dist);
+      //   }
+      // }
       last_io_snapshot.clear();
       auto cpu1_ed = std::chrono::high_resolution_clock::now();
       stats->cpu_us1 += std::chrono::duration_cast<std::chrono::microseconds>(cpu1_ed - cpu1_st).count();
 
-      // Wait for I/O to complete
+      // 4. 等待磁盘 I/O 结果
       auto io_time_st = std::chrono::high_resolution_clock::now();
       if (!frontier.empty()) {
         for (int i = 0; i < n_ios; ++i) {
@@ -245,52 +249,35 @@ namespace pipeann {
       auto io_time_ed = std::chrono::high_resolution_clock::now();
       stats->io_us += std::chrono::duration_cast<std::chrono::microseconds>(io_time_ed - io_time_st).count();
 
-      // Process the newly read frontier nodes
+      // 5. 计算当前轮从磁盘取回的“目标节点”
       auto cpu_st = std::chrono::high_resolution_clock::now();
       for (auto &[id, pid, layout, sector_buf] : frontier_nhoods) {
-        // Save page buffer for next round's pipeline processing
+        // 保存 Page 到 last_pages() / last_io_snapshot 供下一轮 CPU Overlap 使用
         memcpy(last_pages.data() + last_io_snapshot.size() * SECTOR_LEN, sector_buf, SECTOR_LEN);
         last_io_snapshot.emplace_back(std::make_tuple(id, pid, layout));
 
-        // Process the exact frontier node itself
         for (unsigned j = 0; j < meta_.nnodes_per_sector; ++j) {
           unsigned cur_id = layout[j];
-          if (cur_id == id) {
+          if (cur_id == id) { // 仅处理主目标节点
             LVQDiskNode<T> node = lvqnode_from_page(sector_buf, j);
-            compute_dists_and_update(node, id);
-            unsigned best_nbor_pos = add_neighbors_as_placeholders(node);
-            if (best_nbor_pos < nk)
-              nk = best_nbor_pos;
-            break;
+            float dist = compute_dists_and_push(node, id);
+            process_node_and_neighbors(node, id, dist);
           }
         }
       }
       auto cpu_ed = std::chrono::high_resolution_clock::now();
       stats->cpu_us += std::chrono::duration_cast<std::chrono::microseconds>(cpu_ed - cpu_st).count();
-
-      // Sort retset to keep the best candidate at the front
-      // Placeholder (INF distance) will sink to the bottom
-      std::sort(retset.begin(), retset.begin() + cur_list_size);
-
-      // Advance k: if a new neighbor inserted before current k, backtrack
-      if (nk <= k)
-        k = nk;
-      else
-        ++k;
-
-      // Ensure k points to a candidate (skip any that might still be placeholder at front?)
-      // Actually we want k to eventually process all reachable nodes.
     }
 
-    // Final sorting of distances
+    // 后处理：将全量评测过的节点按准确距离排序以返回 k_search
     std::sort(full_retset.begin(), full_retset.end(),
               [](const Neighbor &left, const Neighbor &right) { return left < right; });
 
-    // Deduplicate and return top k_search results
+    // copy k_search values
     uint64_t t = 0;
     for (uint64_t i = 0; i < full_retset.size() && t < k_search; i++) {
       if (i > 0 && full_retset[i].id == full_retset[i - 1].id) {
-        continue;
+        continue; // 去重
       }
       res_tags[t] = id2tag(full_retset[i].id);
       if (distances != nullptr) {

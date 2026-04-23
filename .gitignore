@@ -10,3 +10,4 @@ pipeann/*.so
 pipeann/__pycache__/*
 pipeann.egg-info/
 dist/
+output/

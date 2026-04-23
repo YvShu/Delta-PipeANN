@@ -26,10 +26,10 @@
 
 #define MERGE_ROUND 20            // 定义触发一次强制合并(Merge)的批次间隔
 #define MERGE_IO_THRESHOLD 1.2    // 定义触发合并的磁盘IO阈值比例(当前IO/基准IO > 1.2时合并)
-#define NUM_INSERT_THREADS 4      // 定义执行并发插入的线程数
-#define NUM_MERGE_THREADS 2       // 定义后台合并索引使用的线程数
+#define NUM_INSERT_THREADS 1      // 定义执行并发插入的线程数
+#define NUM_MERGE_THREADS 1       // 定义后台合并索引使用的线程数
 #define NUM_DELETE_THREADS 1      // 定义执行删除操作的线程数(这里仅用1个)
-#define NUM_SEARCH_THREADS 2      // 定义并发查询的线程数
+#define NUM_SEARCH_THREADS 1      // 定义并发查询的线程数
 #define DeleteQPS 1000            // 定义预期的删除QPS
 
 int begin_time = 0;
@@ -269,10 +269,10 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
   }
 
   // change start 索引搜索测试
-  return;
+  // return;
   // change end
 
-  int batch = 100;
+  int batch = step;
   int inMemorySize = 0;
   std::future<void> merge_future;
   uint64_t index_npts = sync_index._disk_index->meta_.npoints;
@@ -301,12 +301,12 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
       if (insert_status == std::future_status::deferred || delete_status == std::future_status::deferred) {
         std::cout << "deferred\n";
       } else if (insert_status == std::future_status::timeout || delete_status == std::future_status::timeout) {
-        ShowMemoryStatus(sync_index._disk_index_prefix_in);
-        double dummy;
-        sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[0], beam_width, sync_index, currentFileName,
-                           false, false, dummy);
-        total_queries += query_num;
-        std::cout << "Queries processed: " << total_queries << std::endl;
+        // ShowMemoryStatus(sync_index._disk_index_prefix_in);
+        // double dummy;
+        // sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[0], beam_width, sync_index, currentFileName,
+        //                    false, false, dummy);
+        // total_queries += query_num;
+        // std::cout << "Queries processed: " << total_queries << std::endl;
       }
       if (insert_status == std::future_status::ready) {
         std::cout << "Insertions complete!\n";
@@ -331,33 +331,57 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
       disk_ios.push_back(diskio);
     }
 
-    if (i == batch - 1) {
-      std::cout << "Done" << std::endl;
-      exit(0);
-    } else if (i % MERGE_ROUND == MERGE_ROUND - 1 || disk_ios[0] / ref_diskio[0] > MERGE_IO_THRESHOLD) {
-      std::cout << "Begin Merge" << std::endl;
-      merge_future = std::async(std::launch::async, merge_kernel<T, TagT>, std::ref(sync_index), std::ref(save_path));
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-      std::cout << "Sending Merge" << std::endl;
-      inMemorySize = 0;
-      std::future_status merge_status;
-      do {
-        merge_status = merge_future.wait_for(std::chrono::seconds(10));
-        double dummy = 0;
-        ShowMemoryStatus(sync_index._disk_index_prefix_in);
-        sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[0], beam_width, sync_index, currentFileName,
-                           false, false, dummy);
-      } while (merge_status != std::future_status::ready);
+    std::cout << "Begin Merge" << std::endl;
+    // merge_future = std::async(std::launch::async, merge_kernel<T, TagT>, std::ref(sync_index), std::ref(save_path));
+    // std::this_thread::sleep_for(std::chrono::seconds(5));
+    // std::cout << "Sending Merge" << std::endl;
+    // inMemorySize = 0;
+    // std::future_status merge_status;
+    merge_kernel<T, TagT>(std::ref(sync_index), std::ref(save_path));
+    // do {
+    //   merge_status = merge_future.wait_for(std::chrono::seconds(10));
+    //   double dummy = 0;
+    //   ShowMemoryStatus(sync_index._disk_index_prefix_in);
+    //   sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[0], beam_width, sync_index, currentFileName,
+    //                      false, false, dummy);
+    // } while (merge_status != std::future_status::ready);
 
-      ref_diskio.clear();
-      for (uint32_t j = 0; j < Lsearch.size(); ++j) {
-        double diskio;
-        sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[j], beam_width, sync_index, currentFileName,
-                           false, true, diskio);
-        ref_diskio.push_back(diskio);
-      }
-      std::cout << "Merge finished " << std::endl;
+    ref_diskio.clear();
+    for (uint32_t j = 0; j < Lsearch.size(); ++j) {
+      double diskio;
+      sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[j], beam_width, sync_index, currentFileName,
+                         false, true, diskio);
+      ref_diskio.push_back(diskio);
     }
+    std::cout << "Merge finished " << std::endl;
+
+    // if (i == batch - 1) {
+    //   std::cout << "Done" << std::endl;
+    //   exit(0);
+    // } else if (i % MERGE_ROUND == MERGE_ROUND - 1 || disk_ios[0] / ref_diskio[0] > MERGE_IO_THRESHOLD) {
+    //   std::cout << "Begin Merge" << std::endl;
+    //   merge_future = std::async(std::launch::async, merge_kernel<T, TagT>, std::ref(sync_index), std::ref(save_path));
+    //   std::this_thread::sleep_for(std::chrono::seconds(5));
+    //   std::cout << "Sending Merge" << std::endl;
+    //   inMemorySize = 0;
+    //   std::future_status merge_status;
+    //   do {
+    //     merge_status = merge_future.wait_for(std::chrono::seconds(10));
+    //     double dummy = 0;
+    //     ShowMemoryStatus(sync_index._disk_index_prefix_in);
+    //     sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[0], beam_width, sync_index, currentFileName,
+    //                        false, false, dummy);
+    //   } while (merge_status != std::future_status::ready);
+
+    //   ref_diskio.clear();
+    //   for (uint32_t j = 0; j < Lsearch.size(); ++j) {
+    //     double diskio;
+    //     sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[j], beam_width, sync_index, currentFileName,
+    //                        false, true, diskio);
+    //     ref_diskio.push_back(diskio);
+    //   }
+    //   std::cout << "Merge finished " << std::endl;
+    // }
   }
 }
 

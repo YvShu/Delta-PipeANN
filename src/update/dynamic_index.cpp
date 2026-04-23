@@ -104,7 +104,10 @@ namespace pipeann {
     std::shared_lock<std::shared_timed_mutex> lock(_merge_lock);  // prevent merge during insert
     journal->append(pipeann::TxType::kInsert, tag);
     auto *deletion_set = &deletion_sets[active_delete_set];
-    return _disk_index->insert_in_place(point, tag, deletion_set);
+    // change start 修改支持lvq量化插入的算法
+    // return _disk_index->insert_in_place(point, tag, deletion_set);
+    return _disk_index->insert_lvq_in_place(point, tag, deletion_set);
+    // change end
   }
 
   template<typename T, typename TagT>
@@ -117,8 +120,15 @@ namespace pipeann {
     size_t n = 0;
 
     // change start 使用纯SSD的搜索方法
-    n = _disk_index->page_search_blind2(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                        beam_width, stats);
+    // n = _disk_index->beam_search_blind(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                    beam_width, stats, deletion_set, dyn_search_l);
+    n = _disk_index->beam_search_blind1(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+                                        beam_width, stats, deletion_set, dyn_search_l);
+    // n = _disk_index->pipe_search_blind(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                         beam_width, stats);
+    // n = _disk_index->pipe_search_blind_node(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                         beam_width, stats);
+
     // change end
     // if (search_mode == BEAM_SEARCH) {
     //   n = _disk_index->beam_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
@@ -155,6 +165,9 @@ namespace pipeann {
   template<typename T, typename TagT>
   void DynamicSSDIndex<T, TagT>::lazy_delete(const TagT &tag) {
     std::unique_lock<std::shared_timed_mutex> lock(delete_lock);
+    // chnage start 删除时是否添加 merge_lock
+    
+    // change end
     journal->append(pipeann::TxType::kDelete, tag);
 
     if (deletion_sets[active_delete_set].find(tag) == deletion_sets[active_delete_set].end()) {
@@ -194,8 +207,12 @@ namespace pipeann {
 
   template<typename T, typename TagT>
   void DynamicSSDIndex<T, TagT>::merge(const uint32_t &nthreads, const uint32_t &n_sampled_nbrs) {
-    _disk_index->merge_deletes(_disk_index_prefix_in, _disk_index_prefix_out, deleted_tags[1 - active_delete_set],
-                               deletion_sets[1 - active_delete_set], nthreads, n_sampled_nbrs);
+    // change start 修改合并方法为lvq版本
+    // _disk_index->merge_deletes(_disk_index_prefix_in, _disk_index_prefix_out, deleted_tags[1 - active_delete_set],
+    //                            deletion_sets[1 - active_delete_set], nthreads, n_sampled_nbrs);
+    _disk_index->merge_deletes_lvq(_disk_index_prefix_in, _disk_index_prefix_out, deleted_tags[1 - active_delete_set],
+                                   deletion_sets[1 - active_delete_set], nthreads, n_sampled_nbrs);
+    // change end
   }
 
   template class DynamicSSDIndex<float>;

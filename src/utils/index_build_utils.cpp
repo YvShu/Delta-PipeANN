@@ -360,10 +360,16 @@ namespace pipeann {
             if (coords[d] < min_val) min_val = coords[d];
             if (coords[d] > max_val) max_val = coords[d];          
         }
-        float step = 0.0f;
-        step = (max_val - min_val) / 255.0f;
-        for (size_t d = 0; d < meta.data_dim; ++d)
+        float step = 1.0f;
+
+        if (max_val <= 255)
         {
+            min_val = std::min(0.0f, min_val);
+        } else {
+            step = (max_val - min_val) / 255.0f;
+        }
+    
+        for (size_t d = 0; d < meta.data_dim; ++d) {
             int p_val = std::round((coords[d] - min_val) / step);
             p_val = std::max(0, std::min(255, p_val));
             out[d] = static_cast<uint8_t>(p_val);
@@ -493,13 +499,13 @@ namespace pipeann {
     auto s = std::chrono::high_resolution_clock::now();
 
     // change start 替换为LVQ量化，无需构建码本和压缩向量
-    // nbr_handler->build(index_prefix_path, normalized_file_path, bytes_per_nbr);
+    nbr_handler->build(index_prefix_path, normalized_file_path, bytes_per_nbr);
     // change end
 
     auto start = std::chrono::high_resolution_clock::now();
-    // auto p_val = nbr_handler->get_sample_p();
-    // pipeann::build_merged_vamana_index<T>(normalized_file_path, _compareMetric, L, R, p_val, M, mem_index_path,
-    //                                       medoids_path, centroids_path, tag_file);
+    auto p_val = nbr_handler->get_sample_p();
+    pipeann::build_merged_vamana_index<T>(normalized_file_path, _compareMetric, L, R, p_val, M, mem_index_path,
+                                          medoids_path, centroids_path, tag_file);
     auto end = std::chrono::high_resolution_clock::now();
     LOG(INFO) << "Vamana index built in: " << std::chrono::duration<double>(end - start).count() << "s.";
 
