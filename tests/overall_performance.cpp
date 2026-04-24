@@ -269,7 +269,7 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
   }
 
   // change start 索引搜索测试
-  // return;
+  return;
   // change end
 
   int batch = step;
@@ -301,12 +301,12 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
       if (insert_status == std::future_status::deferred || delete_status == std::future_status::deferred) {
         std::cout << "deferred\n";
       } else if (insert_status == std::future_status::timeout || delete_status == std::future_status::timeout) {
-        // ShowMemoryStatus(sync_index._disk_index_prefix_in);
-        // double dummy;
-        // sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[0], beam_width, sync_index, currentFileName,
-        //                    false, false, dummy);
-        // total_queries += query_num;
-        // std::cout << "Queries processed: " << total_queries << std::endl;
+        ShowMemoryStatus(sync_index._disk_index_prefix_in);
+        double dummy;
+        sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[0], beam_width, sync_index, currentFileName,
+                           false, false, dummy);
+        total_queries += query_num;
+        std::cout << "Queries processed: " << total_queries << std::endl;
       }
       if (insert_status == std::future_status::ready) {
         std::cout << "Insertions complete!\n";

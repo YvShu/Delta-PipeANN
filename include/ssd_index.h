@@ -193,6 +193,12 @@ namespace pipeann {
                                   TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
                                   AbstractSelector *selector = nullptr, const void *filter_data = nullptr,
                                   const uint64_t relaxed_monotonicity_l = 0);
+
+    size_t pipe_search_blind_page(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
+                                  TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
+                                  AbstractSelector *selector = nullptr, const void *filter_data = nullptr,
+                                  const uint64_t relaxed_monotonicity_l = 0);
+
     // change end
 
     int insert_in_place(const T *point, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set = nullptr);

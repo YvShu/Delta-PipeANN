@@ -120,13 +120,15 @@ namespace pipeann {
     size_t n = 0;
 
     // change start 使用纯SSD的搜索方法
-    // n = _disk_index->beam_search_blind(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-    //                                    beam_width, stats, deletion_set, dyn_search_l);
-    n = _disk_index->beam_search_blind1(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                        beam_width, stats, deletion_set, dyn_search_l);
+    n = _disk_index->beam_search_blind(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+                                       beam_width, stats, deletion_set, dyn_search_l);
+    // n = _disk_index->beam_search_blind1(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                     beam_width, stats, deletion_set, dyn_search_l);
     // n = _disk_index->pipe_search_blind(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
     //                                         beam_width, stats);
     // n = _disk_index->pipe_search_blind_node(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                         beam_width, stats);
+    // n = _disk_index->pipe_search_blind_page(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
     //                                         beam_width, stats);
 
     // change end
@@ -166,7 +168,7 @@ namespace pipeann {
   void DynamicSSDIndex<T, TagT>::lazy_delete(const TagT &tag) {
     std::unique_lock<std::shared_timed_mutex> lock(delete_lock);
     // chnage start 删除时是否添加 merge_lock
-    
+
     // change end
     journal->append(pipeann::TxType::kDelete, tag);
 

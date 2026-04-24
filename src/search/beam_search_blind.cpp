@@ -1,3 +1,10 @@
+/*
+ * @Author: Guyue
+ * @Date: 2026-04-17 15:25:15
+ * @LastEditTime: 2026-04-24 16:47:23
+ * @LastEditors: Guyue
+ * @FilePath: /Delta-PipeANN/src/search/beam_search_blind.cpp
+ */
 #include "aligned_file_reader.h"
 #include "utils/libcuckoo/cuckoohash_map.hh"
 #include "ssd_index.h"
@@ -26,55 +33,24 @@ namespace pipeann {
                                                tsl::robin_map<uint32_t, T *> *coord_map, T *coord_buf, QueryStats *stats,
                                                tsl::robin_set<uint32_t> *exclude_nodes /* tags */, bool dyn_search_l,
                                                std::vector<uint64_t> *passthrough_page_ref) {
-    uint32_t original_l_search = l_search;
-    auto diskSearchBegin = std::chrono::high_resolution_clock::now();
-
-    auto query_buf = pop_query_buf(query1);
+    QueryBuffer<T> *query_buf = pop_query_buf(query1);
     void *ctx = reader->get_ctx();
 
     const T *query = query_buf->aligned_query_T;
-
-    // reset query
     query_buf->reset();
-
-    // pointers to current vector for comparison
     T *data_buf = query_buf->coord_scratch;
     _mm_prefetch((char *) data_buf, _MM_HINT_T1);
-
-    // sector scratch
     char *sector_scratch = query_buf->sector_scratch;
     uint64_t &sector_scratch_idx = query_buf->sector_idx;
 
-    float *dist_scratch = query_buf->aligned_dist_scratch;
-
-    Timer query_timer, io_timer, cpu_timer;
-    std::vector<Neighbor> retset;
-    retset.resize(mem_L + 10 * l_search);
-    // retset.resize(4096);
-    tsl::robin_set<uint64_t> visited(4096);
-
-    // re-naming `expanded_nodes_info` to not change rest of the code
-    std::vector<Neighbor> &full_retset = expanded_nodes_info;
-    full_retset.reserve(10 * l_search);
-
+    Timer query_timer;
+    std::vector<Neighbor> retset;                                 // 候选队列
+    std::vector<Neighbor> &full_retset = expanded_nodes_info;     // 距离结果记录
+    std::unordered_map<unsigned, std::vector<uint32_t>> nbr_buf;  // 记录某节点的邻居有哪些
+    auto &visited = *(query_buf->visited);                        // 标记是否已算过距离
+    retset.resize(l_search + 1);
+    full_retset.reserve(l_search * 10);
     unsigned cur_list_size = 0;
-
-    if (mem_L) {
-    } else {
-      // Do not use optimized start point.
-      // compute_and_add_to_retset(&meta_.entry_point_id, 1);
-      retset[cur_list_size].id = meta_.entry_point_id;
-      retset[cur_list_size].distance = 0.0f;
-      retset[cur_list_size++].flag = true;
-      visited.insert(meta_.entry_point_id);
-    }
-
-    std::sort(retset.begin(), retset.begin() + cur_list_size);
-
-    unsigned cmps = 0;
-    unsigned hops = 0;
-    unsigned num_ios = 0;
-    unsigned k = 0;
 
     // cleared every iteration
     std::vector<unsigned> frontier;
@@ -86,35 +62,102 @@ namespace pipeann {
     std::vector<uint64_t> new_page_ref{};
     std::vector<uint64_t> &page_ref = passthrough_page_ref ? *passthrough_page_ref : new_page_ref;
 
-    uint64_t coord_buf_idx = 0;  // used by coord_map
+    // Helper 计算从磁盘取回的向量距离
+    auto compute_dist_and_push = [&](const LVQDiskNode<T> &node, const unsigned id) -> float {
+      T *node_fp_coords_copy = data_buf;
+
+      std::vector<float> tmp(meta_.data_dim);
+      for (size_t i = 0; i < meta_.data_dim; ++i) {
+        uint8_t q_val = node.coords[i];
+        tmp[i] = (static_cast<float>(q_val) * node.step) + node.minval;
+      }
+      memcpy(node_fp_coords_copy, tmp.data(), meta_.data_dim * sizeof(T));
+      float cur_dist = dist_cmp->compare(query, node_fp_coords_copy, (unsigned) aligned_dim);
+
+      full_retset.push_back(Neighbor(id, cur_dist, true));
+      return cur_dist;
+    };
+
+    if (stats != nullptr) {
+      stats->io_us = 0;
+      stats->io_us1 = 0;
+      stats->cpu_us = 0;
+      stats->cpu_us1 = 0;
+      stats->cpu_us2 = 0;
+    }
+    
+    if (mem_L) {
+    } else {
+      retset[cur_list_size++] = Neighbor(meta_.entry_point_id, 0.0f, true);
+      visited.insert(meta_.entry_point_id);
+      frontier.push_back(meta_.entry_point_id);
+    }
+
+    unsigned k = 0;
+    unsigned num_ios = 0;
+
+    auto cpu2_st = std::chrono::high_resolution_clock::now();
+
+    std::vector<uint32_t> locked;
+    if (!frontier.empty()) {
+      locked = this->lock_idx(idx_lock_table, kInvalidID, frontier, true);
+      for (uint64_t i = 0; i < frontier.size(); ++i) {
+        uint32_t id = frontier[i];
+        uint32_t loc = this->id2loc(id);
+        uint64_t offset = loc_sector_no(loc) * SECTOR_LEN;
+        auto sector_buf = sector_scratch + sector_scratch_idx * size_per_io;
+        fnhood_t fnhood = std::make_tuple(id, loc, sector_buf);
+        sector_scratch_idx++;
+        frontier_nhoods.push_back(fnhood);
+        frontier_read_reqs.emplace_back(IORequest(offset, size_per_io, sector_buf, u_loc_offset(loc), meta_.max_node_len, sector_scratch));
+      
+        num_ios++;
+      }
+      reader->read_alloc(frontier_read_reqs, ctx, &page_ref);
+
+      this->unlock_idx(idx_lock_table, locked);
+    }
+    for (auto &frontier_nhood : frontier_nhoods) {
+      auto [id, loc, sector_buf] = frontier_nhood;
+      LVQDiskNode<T> node = lvqnode_from_page(sector_buf, loc);
+
+      std::vector<uint32_t> nbr(node.nnbrs);
+      memcpy(nbr.data(), node.nbrs, node.nnbrs * sizeof(uint32_t));
+      nbr_buf[id] = nbr;
+    }
+
     while (k < cur_list_size) {
       auto nk = cur_list_size;
-      // clear iteration state
       frontier.clear();
       frontier_nhoods.clear();
       frontier_read_reqs.clear();
-      vec_rdlocks.clear();
       sector_scratch_idx = 0;
-      // find new beam
-      // WAS: uint64_t marker = k - 1;
+
+      // 1、取出一个待扩展节点，将其邻居纳入读取队列
       uint32_t marker = k;
-      uint32_t num_seen = 0;
-      while (marker < cur_list_size && frontier.size() < beam_width && num_seen < beam_width) {
+      while (marker < cur_list_size) {
         if (retset[marker].flag) {
-          num_seen++;
-          frontier.push_back(retset[marker].id);
+          if (nbr_buf.find(retset[marker].id) == nbr_buf.end()) {
+            LOG(ERROR) << retset[marker].id << " " << " not found in nbr_buf_map";
+            exit(-1);
+          }
+          for (uint64_t i = 0; i < nbr_buf[retset[marker].id].size(); ++i) {
+            if (visited.find(nbr_buf[retset[marker].id][i]) == visited.end()) {
+              frontier.push_back(nbr_buf[retset[marker].id][i]);
+            }
+          }
           retset[marker].flag = false;
+          nbr_buf.erase(retset[marker].id);
+          break;
         }
         marker++;
       }
 
-      // read nhoods of frontier ids
-      std::vector<uint32_t> locked;
+      // 2、发起读取请求，读出读取队列中的节点
+      // std::vector<uint32_t> locked;
       if (!frontier.empty()) {
-        if (stats != nullptr)
-          stats->n_hops++;
         locked = this->lock_idx(idx_lock_table, kInvalidID, frontier, true);
-        for (uint64_t i = 0; i < frontier.size(); i++) {
+        for (uint64_t i = 0; i < frontier.size(); ++i) {
           uint32_t id = frontier[i];
           uint32_t loc = this->id2loc(id);
           uint64_t offset = loc_sector_no(loc) * SECTOR_LEN;
@@ -122,158 +165,43 @@ namespace pipeann {
           fnhood_t fnhood = std::make_tuple(id, loc, sector_buf);
           sector_scratch_idx++;
           frontier_nhoods.push_back(fnhood);
-          frontier_read_reqs.emplace_back(
-              IORequest(offset, size_per_io, sector_buf, u_loc_offset(loc), meta_.max_node_len, sector_scratch));
+          frontier_read_reqs.emplace_back(IORequest(offset, size_per_io, sector_buf, u_loc_offset(loc), meta_.max_node_len, sector_scratch));
           if (stats != nullptr) {
             stats->n_4k++;
             stats->n_ios++;
-          }
+          }  
           num_ios++;
         }
-        io_timer.reset();
         reader->read_alloc(frontier_read_reqs, ctx, &page_ref);
 
-        if (stats != nullptr) {
-          stats->io_us += (double) io_timer.elapsed();
-        }
         this->unlock_idx(idx_lock_table, locked);
       }
-
+      
+      // 3、计算查询与扩展点邻居节点的距离
       for (auto &frontier_nhood : frontier_nhoods) {
         auto [id, loc, sector_buf] = frontier_nhood;
         LVQDiskNode<T> node = lvqnode_from_page(sector_buf, loc);
 
-        T *node_fp_coords_copy = data_buf;
-        std::vector<float> point(meta_.data_dim);
-        for (size_t i = 0; i < meta_.data_dim; ++i) {
-          uint8_t q_val = node.coords[i];
-          point[i] = (static_cast<float>(q_val) * node.step) + node.minval;
-        }
-        memcpy(node_fp_coords_copy, point.data(), meta_.data_dim * sizeof(T));
-        float cur_expanded_dist = dist_cmp->compare(query, node_fp_coords_copy, (unsigned) aligned_dim);
+        float cur_dist = compute_dist_and_push(node, id);
+        visited.insert(id);
 
-        if (coord_map != nullptr) {
-          if (unlikely(coord_buf == nullptr || coord_buf_idx > this->params.L * 10)) {
-            LOG(ERROR) << "Please allocate larger coord_buf.";
-            crash();
-          }
-          T *coord_ptr = coord_buf + coord_buf_idx * aligned_dim;
-          memcpy(coord_ptr, point.data(), meta_.data_dim * sizeof(T));
-          coord_map->insert(std::make_pair(id, node_fp_coords_copy));
-          coord_buf_idx++;
-        }
-        full_retset.push_back(Neighbor(id, cur_expanded_dist, true));
+        std::vector<uint32_t> nbr(node.nnbrs);
+        memcpy(nbr.data(), node.nbrs, node.nnbrs * sizeof(uint32_t));
+        nbr_buf[id] = nbr;
 
-        cpu_timer.reset();
-        if (stats != nullptr) {
-          stats->n_cmps += (double) node.nnbrs;
-        }
-
-        cpu_timer.reset();
-        
-        Neighbor nn(id, cur_expanded_dist, false);
+        Neighbor nn(id, cur_dist, true);
         auto r = InsertIntoPool(retset.data(), cur_list_size, nn);
         if (cur_list_size < l_search) {
-          ++cur_list_size;
+          cur_list_size++;
         }
-        if (r < l_search) {
-          unsigned *node_nbrs = node.nbrs;
-          unsigned nnbrs = node.nnbrs;
-          for (unsigned m = 0; m < nnbrs; ++m) {
-            unsigned nbor_id = node_nbrs[m];
-            if (visited.find(nbor_id) == visited.end()) {
-              visited.insert(nbor_id);
-              Neighbor nnbr(nbor_id, cur_expanded_dist, true);
-              auto r = InsertIntoPool(retset.data(), cur_list_size, nnbr);
-              if (cur_list_size < l_search) {
-                ++cur_list_size;
-                if (unlikely(cur_list_size >= retset.size())) {
-                  retset.resize(2 * cur_list_size);
-                }
-              }
-
-              if (r < nk)
-                nk = r;
-            }
-          }
-        }
-
-        // // process prefetch-ed nhood
-        // for (uint64_t m = 0; m < node.nnbrs; ++m) {
-        //   unsigned id = node.nbrs[m];
-        //   if (unlikely(id > this->cur_id)) {
-        //     LOG(ERROR) << "ID is larger than current ID, " << id << " vs " << this->cur_id;
-        //     crash();
-        //   }
-        //   if (visited.find(id) != visited.end()) {
-        //     continue;
-        //   } else {
-        //     visited.insert(id);
-        //     cmps++;
-        //     float dist = cur_expanded_dist;
-        //     if (stats != nullptr) {
-        //       stats->n_cmps++;
-        //     }
-        //     if (dist >= retset[cur_list_size - 1].distance && (cur_list_size == l_search))
-        //       continue;
-        //     Neighbor nn(id, dist, true);
-        //     // variable search_L for deleted nodes.
-        //     // Return position in sorted list where nn inserted.
-
-        //     auto r = InsertIntoPool(retset.data(), cur_list_size, nn);
-
-        //     if (cur_list_size < l_search) {
-        //       ++cur_list_size;
-        //       if (unlikely(cur_list_size >= retset.size())) {
-        //         retset.resize(2 * cur_list_size);
-        //       }
-        //     }
-
-        //     if (r < nk)
-        //       nk = r;  // nk logs the best position in the retset that was
-        //                // updated due to neighbors of n.
-        //   }
-        // }
-
-        if (dyn_search_l) {
-          // TODO(gh): contention still exists in id2tag(x)
-          // O(n), but it is not slow as L is typically smaller than 300.
-          // l_search monotonically increases to handle deleted nodes.
-          uint32_t tot = 0, cur = 0;
-          for (cur = 0; cur < cur_list_size; ++cur) {
-            uint32_t tag = id2tag(retset[cur].id);
-            if (exclude_nodes->find(tag) == exclude_nodes->end()) {
-              ++tot;
-              if (tot == original_l_search) {
-                break;
-              }
-            }
-          }
-          // cur is the stopped index (cur + 1 is the length it should be)
-          l_search = std::max(original_l_search, cur + 1);
-        }
-
-        if (stats != nullptr) {
-          stats->cpu_us += (double) cpu_timer.elapsed();
-        }
+        if (r < nk)
+          nk = r;
       }
-
-      // update best inserted position
-      //
 
       if (nk <= k)
-        k = nk;  // k is the best position in retset updated in this round.
-      else
+        k = nk;
+      else 
         ++k;
-
-      hops++;
-      if (stats != nullptr && stats->n_current_used != 0) {
-        auto diskSearchEnd = std::chrono::high_resolution_clock::now();
-        double elapsedSeconds =
-            std::chrono::duration_cast<std::chrono::milliseconds>(diskSearchEnd - diskSearchBegin).count();
-        if (elapsedSeconds >= stats->n_current_used)
-          break;
-      }
     }
     // re-sort by distance
     std::sort(full_retset.begin(), full_retset.end(),

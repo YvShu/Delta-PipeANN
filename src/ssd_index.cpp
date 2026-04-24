@@ -150,7 +150,7 @@ namespace pipeann {
     this->max_nthreads = num_threads;
 
     // load page layout.
-    this->use_page_search_ = use_page_search;
+    // this->use_page_search_ = use_page_search;
     this->load_page_layout(index_prefix, meta_.nnodes_per_sector, meta_.npoints);
 
     // load tags

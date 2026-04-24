@@ -46,8 +46,6 @@ namespace pipeann {
                                 &page_ref, read_data);
     // this->do_pipe_search_blind(point1, 0, params.L, params.beam_width, exp_node_info, &coord_map, nullptr, deletion_set, false,
     //                            &page_ref, read_data);
-    // this->do_beam_search_blind(point1, 0, params.L, params.beam_width, exp_node_info, &coord_map, coord_buf, nullptr,
-    //                            deletion_set, false, &page_ref);
     // LOG(INFO) << "insert search finish";
     // change end
 
