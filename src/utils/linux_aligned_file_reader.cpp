@@ -229,6 +229,39 @@ void LinuxAlignedFileReader::poll_wait(void *ctx) {
   if (req != nullptr) {
     req->finished = true;
   }
+
+  // change start 添加缓存
+  // for (uint64_t i = 0; i < req->len / SECTOR_LEN; i++) {
+  //   pipeann::cache.put(req->offset / SECTOR_LEN + i, (uint8_t *) req->buf + i * SECTOR_LEN, true);
+  // }
+  // change end
+
+  io_uring_cqe_seen(ring, cqe);
+}
+
+void LinuxAlignedFileReader::poll_wait(void *ctx, bool cache = false) {
+  io_uring *ring = (io_uring *) ctx;
+  io_uring_cqe *cqe = nullptr;
+  int ret = 0;
+  do {
+    ret = io_uring_wait_cqe(ring, &cqe);
+  } while (ret == -EINTR);
+  if (ret < 0 || cqe->res < 0) {
+    LOG(ERROR) << "Failed " << strerror(-cqe->res);
+  }
+  IORequest *req = (IORequest *) cqe->user_data;
+  if (req != nullptr) {
+    req->finished = true;
+  }
+
+  // change start 添加缓存
+  // if (cache) {
+  //   for (uint64_t i = 0; i < req->len / SECTOR_LEN; i++) {
+  //     pipeann::cache.put(req->offset / SECTOR_LEN + i, (uint8_t *) req->buf + i * SECTOR_LEN, true);
+  //   }
+  // }
+  // change end
+
   io_uring_cqe_seen(ring, cqe);
 }
 

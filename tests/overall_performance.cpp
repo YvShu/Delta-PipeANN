@@ -101,6 +101,8 @@ void sync_search_kernel(T *query, size_t query_num, size_t query_dim, const int 
   std::cout << std::setw(4) << "Ls" << std::setw(12) << "QPS " << std::setw(18) << "Mean Lat" << std::setw(12)
             << "50 Lat" << std::setw(12) << "90 Lat" << std::setw(12) << "95 Lat" << std::setw(12) << "99 Lat"
             << std::setw(12) << "99.9 Lat" << std::setw(12) << recall_string << std::setw(12) << "Disk IOs"
+            << std::setw(12) << "IO Ready" << std::setw(12) << "Last CPU" << std::setw(12) 
+            << "IO Wait" << std::setw(12) << "Cur CPU" << std::setw(12) << "Loop" << std::setw(12) << "Total"
             << std::endl;
   std::cout << "==============================================================="
                "==============="
@@ -110,7 +112,7 @@ void sync_search_kernel(T *query, size_t query_num, size_t query_dim, const int 
   for (int64_t i = 0; i < (int64_t) query_num; i++) {
     auto qs = std::chrono::high_resolution_clock::now();
     // stats[i].n_current_used = 8;
-    sync_index.search(query + i * query_dim, recall_at, 0, L, beam_width, query_result_tags + i * recall_at,
+    sync_index.search(query + i * query_dim, recall_at, beam_width, L, beam_width, query_result_tags + i * recall_at,
                       query_result_dists + i * recall_at, stats + i, true);
 
     auto qe = std::chrono::high_resolution_clock::now();
@@ -134,6 +136,24 @@ void sync_search_kernel(T *query, size_t query_num, size_t query_dim, const int 
 
   float mean_ios =
       (float) pipeann::get_mean_stats(stats, query_num, [](const pipeann::QueryStats &stats) { return stats.n_ios; });
+  
+  float mean_io_time = 
+      (float) pipeann::get_mean_stats(stats, query_num, [](const pipeann::QueryStats &stats) { return stats.io_us; });
+
+  float mean_io1_time = 
+      (float) pipeann::get_mean_stats(stats, query_num, [](const pipeann::QueryStats &stats) { return stats.io_us1; });
+
+  float mean_cpu1_time = 
+      (float) pipeann::get_mean_stats(stats, query_num, [](const pipeann::QueryStats &stats) { return stats.cpu_us1; });
+  
+  float mean_cpu2_time = 
+      (float) pipeann::get_mean_stats(stats, query_num, [](const pipeann::QueryStats &stats) { return stats.cpu_us2; });
+
+  float mean_cpu_time = 
+      (float) pipeann::get_mean_stats(stats, query_num, [](const pipeann::QueryStats &stats) { return stats.cpu_us; });
+
+  float mean_time = 
+      (float) pipeann::get_mean_stats(stats, query_num, [](const pipeann::QueryStats &stats) { return stats.total_us; });
 
   std::sort(latency_stats.begin(), latency_stats.end());
   std::cout << std::setw(4) << L << std::setw(12) << qps << std::setw(18)
@@ -143,7 +163,14 @@ void sync_search_kernel(T *query, size_t query_num, size_t query_dim, const int 
             << (float) latency_stats[(uint64_t) (0.95 * ((double) query_num))] << std::setw(12)
             << (float) latency_stats[(uint64_t) (0.99 * ((double) query_num))] << std::setw(12)
             << (float) latency_stats[(uint64_t) (0.999 * ((double) query_num))] << std::setw(12) << recall
-            << std::setw(12) << mean_ios << std::endl;
+            // << std::setw(12) << mean_ios << " " << stats[0].io_us / 1000 << " " << stats[0].io_us1 / 1000 << " " << stats[0].cpu_us1 / 1000 << " " << stats[0].cpu_us2 / 1000 << " " << stats[0].cpu_us / 1000 << " " << stats[0].total_us / 1000 << std::endl;
+            << std::setw(12) << mean_ios 
+            << std::setw(12) << mean_io1_time / 1000 
+            << std::setw(12)  << mean_cpu1_time / 1000 
+            << std::setw(12) << mean_io_time / 1000 
+            << std::setw(12) << mean_cpu2_time / 1000 
+            << std::setw(12) << mean_cpu_time / 1000 
+            << std::setw(12) << mean_time / 1000 << std::endl;
   disk_io = mean_ios;
 
   delete[] query_result_dists;
@@ -246,7 +273,8 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
   dim = query_dim;
   aligned_dim = query_dim;
   pipeann::Metric metric = pipeann::Metric::L2;
-  pipeann::DynamicSSDIndex<T, TagT> sync_index(paras, save_path, save_path + "_merge", dist_cmp, metric);
+  pipeann::DynamicSSDIndex<T, TagT> sync_index(paras, save_path, save_path + "_merge", dist_cmp, metric, 1, true);
+  // pipeann::DynamicSSDIndex<T, TagT> sync_index(paras, save_path, save_path + "_merge", dist_cmp, metric, 1);
   
   // change start 索引加载测试
   // return;
@@ -268,6 +296,7 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
     ref_diskio.push_back(diskio);
   }
 
+  LOG(INFO) << "Page cache size: " << pipeann::cache.cache.size();
   // change start 索引搜索测试
   return;
   // change end
@@ -304,7 +333,7 @@ void update(const std::string &data_bin, const unsigned L_disk, int step, const 
         ShowMemoryStatus(sync_index._disk_index_prefix_in);
         double dummy;
         sync_search_kernel(query, query_num, query_dim, recall_at, Lsearch[0], beam_width, sync_index, currentFileName,
-                           false, false, dummy);
+                           false, true, dummy);
         total_queries += query_num;
         std::cout << "Queries processed: " << total_queries << std::endl;
       }

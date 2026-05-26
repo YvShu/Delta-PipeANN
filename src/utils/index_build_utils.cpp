@@ -362,6 +362,7 @@ namespace pipeann {
         }
         float step = 1.0f;
 
+        // step = (max_val - min_val) / 255.0f;
         if (max_val <= 255)
         {
             min_val = std::min(0.0f, min_val);

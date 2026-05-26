@@ -106,7 +106,12 @@ namespace pipeann {
     }
 
     void init_query_buf(QueryBuffer<T> &buf) {
+      // change start 为coord_scratch分配内存
+      // uint64_t coord_alloc_size = ROUND_UP(MAX_N_CMPS * this->aligned_dim, 8 * sizeof(T));
+      // pipeann::alloc_aligned((void **) &buf.coord_scratch, coord_alloc_size, 8 * sizeof(T));
       pipeann::alloc_aligned((void **) &buf.coord_scratch, this->aligned_dim * sizeof(T), 8 * sizeof(T));
+      // change end
+      
       pipeann::alloc_aligned((void **) &buf.sector_scratch, MAX_N_SECTOR_READS * size_per_io, SECTOR_LEN);
       pipeann::alloc_aligned((void **) &buf.nbr_vec_scratch,
                              MAX_N_EDGES * AbstractNeighbor<T>::MAX_BYTES_PER_NBR * sizeof(uint8_t), 256);
@@ -118,7 +123,10 @@ namespace pipeann {
       buf.page_visited = new tsl::robin_set<unsigned>(4096);
 
       memset(buf.sector_scratch, 0, MAX_N_SECTOR_READS * SECTOR_LEN);
+      // change start 为coord_scratch设置内存
+      // memset(buf.coord_scratch, 0, coord_alloc_size);
       memset(buf.coord_scratch, 0, this->aligned_dim * sizeof(T));
+      // change end
       memset(buf.aligned_query_T, 0, this->aligned_dim * sizeof(T));
     }
 
@@ -171,9 +179,17 @@ namespace pipeann {
                        const uint64_t relaxed_monotonicity_l = 0);
     
     // change start 添加纯SSD盲搜算法
-    size_t beam_search_blind(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
-                             TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
-                             tsl::robin_set<uint32_t> *deleted_nodes = nullptr, bool dyn_search_l = true);
+    size_t ssd_search(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
+                      TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
+                      tsl::robin_set<uint32_t> *deleted_nodes = nullptr, bool dyn_search_l = true);
+
+    size_t ssd_search_node(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
+                            TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
+                            tsl::robin_set<uint32_t> *deleted_nodes = nullptr, bool dyn_search_l = true);
+
+    size_t ssd_search_page(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
+                           TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
+                           tsl::robin_set<uint32_t> *deleted_nodes = nullptr, bool dyn_search_l = true);
 
     size_t beam_search_blind1(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
                               TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
@@ -205,6 +221,10 @@ namespace pipeann {
 
     // change start 添加SSD LVQ量化向量直接插入算法
     int insert_lvq_in_place(const T *point, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set = nullptr);
+    // change end
+    
+    // change start 添加SSD LVQ量化向量直接删除算法
+    int delete_lvq_in_place(const TagT &tag, const uint32_t l, const uint32_t k, const uint32_t c, tsl::robin_set<uint32_t> *deletion_set);
     // change end
 
     // Merge deletes (NOTE: index read-only during merge.)
@@ -315,13 +335,7 @@ namespace pipeann {
                         tsl::robin_set<uint32_t> *exclude_nodes = nullptr, bool dyn_search_l = true,
                         std::vector<uint64_t> *passthrough_page_ref = nullptr);
 
-    // change start 添加beam search的纯SSD版本
-    void do_beam_search_blind(const T *vec, uint32_t mem_L, uint32_t Lsize, const uint32_t beam_width,
-                              std::vector<Neighbor> &expanded_nodes_info, tsl::robin_map<uint32_t, T *> *coord_map = nullptr,
-                              T *coord_buf = nullptr, QueryStats *stats = nullptr,
-                              tsl::robin_set<uint32_t> *exclude_nodes = nullptr, bool dyn_search_l = true,
-                              std::vector<uint64_t> *passthrough_page_ref = nullptr);
-    
+    // change start 添加beam search的纯SSD版本    
     void do_beam_search_blind1(const T *vec, uint32_t mem_L, uint32_t Lsize, const uint32_t beam_width,
                                std::vector<Neighbor> &expanded_nodes_info, tsl::robin_map<uint32_t, T *> *coord_map = nullptr,
                                QueryStats *stats = nullptr, tsl::robin_set<uint32_t> *exclude_nodes = nullptr,
@@ -333,6 +347,24 @@ namespace pipeann {
                               QueryStats *stats = nullptr, tsl::robin_set<uint32_t> *exclude_nodes = nullptr, 
                               bool dyn_search_l = true, std::vector<uint64_t> *passthrough_page_ref = nullptr, 
                               QueryBuffer<T> * passthrough_data = nullptr);
+
+    void do_ssd_search(const T *vec, uint32_t mem_L, uint32_t Lsize, const uint32_t beam_width,
+                       std::vector<Neighbor> &expanded_nodes_info, tsl::robin_map<uint32_t, T *> *coord_map = nullptr,
+                       QueryStats *stats = nullptr, tsl::robin_set<uint32_t> *exclude_nodes = nullptr, 
+                       bool dyn_search_l = true, std::vector<uint64_t> *passthrough_page_ref = nullptr, 
+                       QueryBuffer<T> * passthrough_data = nullptr);
+
+    void do_ssd_search_node(const T *vec, uint32_t mem_L, uint32_t Lsize, const uint32_t beam_width,
+                            std::vector<Neighbor> &expanded_nodes_info, tsl::robin_map<uint32_t, T *> *coord_map = nullptr,
+                            T *coord_buf = nullptr, QueryStats *stats = nullptr,
+                            tsl::robin_set<uint32_t> *exclude_nodes = nullptr, bool dyn_search_l = true,
+                            std::vector<uint64_t> *passthrough_page_ref = nullptr);
+
+    void do_ssd_search_page(const T *vec, uint32_t mem_L, uint32_t Lsize, const uint32_t beam_width,
+                            std::vector<Neighbor> &expanded_nodes_info, tsl::robin_map<uint32_t, T *> *coord_map = nullptr,
+                            T *coord_buf = nullptr, QueryStats *stats = nullptr,
+                            tsl::robin_set<uint32_t> *exclude_nodes = nullptr, bool dyn_search_l = true,
+                            std::vector<uint64_t> *passthrough_page_ref = nullptr);
     // change end
 
     // Background I/O thread function.

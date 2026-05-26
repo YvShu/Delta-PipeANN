@@ -3,6 +3,7 @@
 #include "utils.h"
 #include "utils/tsl/robin_set.h"
 
+constexpr size_t MAX_N_CMPS = 16384;
 constexpr size_t MAX_N_SECTOR_READS = 128;
 constexpr size_t MAX_N_EDGES = 1024;
 constexpr size_t INDEX_SIZE_FACTOR = 2;  // space amplification during insert.

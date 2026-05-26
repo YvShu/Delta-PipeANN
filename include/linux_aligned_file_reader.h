@@ -1,3 +1,10 @@
+/*
+ * @Author: Guyue
+ * @Date: 2026-04-15 11:22:55
+ * @LastEditTime: 2026-05-13 14:37:53
+ * @LastEditors: Guyue
+ * @FilePath: /Delta-PipeANN/include/linux_aligned_file_reader.h
+ */
 #pragma once
 
 #include "aligned_file_reader.h"
@@ -40,6 +47,9 @@ class LinuxAlignedFileReader : public AlignedFileReader {
   int poll(void *ctx);
   void poll_all(void *ctx);
   void poll_wait(void *ctx);
+  // change start 添加缓存标识
+  void poll_wait(void *ctx, bool cache);
+  // change end
 
   // register thread-id for a context
   void register_thread(int flag = 0);

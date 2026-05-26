@@ -120,18 +120,12 @@ namespace pipeann {
     size_t n = 0;
 
     // change start 使用纯SSD的搜索方法
-    n = _disk_index->beam_search_blind(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                       beam_width, stats, deletion_set, dyn_search_l);
-    // n = _disk_index->beam_search_blind1(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-    //                                     beam_width, stats, deletion_set, dyn_search_l);
-    // n = _disk_index->pipe_search_blind(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-    //                                         beam_width, stats);
-    // n = _disk_index->pipe_search_blind_node(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-    //                                         beam_width, stats);
-    // n = _disk_index->pipe_search_blind_page(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-    //                                         beam_width, stats);
-
+    n = _disk_index->ssd_search_page(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+                                     beam_width, stats, deletion_set, dyn_search_l);
+    // n = _disk_index->ssd_search_node(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+    //                                  beam_width, stats, deletion_set, dyn_search_l);
     // change end
+    
     // if (search_mode == BEAM_SEARCH) {
     //   n = _disk_index->beam_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
     //                                beam_width, stats, deletion_set, dyn_search_l);

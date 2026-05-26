@@ -1,3 +1,10 @@
+/*
+ * @Author: Guyue
+ * @Date: 2026-04-15 11:22:55
+ * @LastEditTime: 2026-05-13 14:41:38
+ * @LastEditors: Guyue
+ * @FilePath: /Delta-PipeANN/include/aligned_file_reader.h
+ */
 #pragma once
 
 #define MAX_IO_DEPTH 128
@@ -77,6 +84,9 @@ class AlignedFileReader {
   virtual int poll(void *ctx) = 0;
   virtual void poll_all(void *ctx) = 0;
   virtual void poll_wait(void *ctx) = 0;
+  // change start 添加缓存标识
+  virtual void poll_wait(void *ctx, bool cache) = 0;
+  // change end
 
  protected:
   // register thread-id for a context

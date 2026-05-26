@@ -23,7 +23,6 @@
 namespace pipeann {
   template<typename T, typename TagT>
   int SSDIndex<T, TagT>::insert_lvq_in_place(const T *point1, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set) {
-    // LOG(INFO) << "insert start";
     QueryBuffer<T> *read_data = this->pop_query_buf(point1);
     T *point = read_data->aligned_query_T;
     void *ctx = reader->get_ctx();
@@ -32,34 +31,26 @@ namespace pipeann {
 
     std::vector<Neighbor> exp_node_info;
     tsl::robin_map<uint32_t, T *> coord_map;
-    coord_map.reserve(2 * this->params.L);
+    coord_map.reserve(4096);
+    T *coord_buf = nullptr;
+    alloc_aligned((void **) &coord_buf, 4096 * this->aligned_dim * sizeof(T), 256);
 
-    // T *coord_buf = nullptr;
-    // alloc_aligned((void **) &coord_buf, 10 * this->params.L * this->aligned_dim, 256);
     std::vector<uint64_t> page_ref{};
     
     // change start 修改为lvq SSD量化搜索函数
-    // LOG(INFO) << "insert search start";
-    // this->do_pipe_search_blind(point1, 0, params.L, params.beam_width, exp_node_info, &coord_map, coord_buf, nullptr,
-    //                            deletion_set, false, &page_ref);
-    this->do_beam_search_blind1(point1, 0, params.L, params.beam_width, exp_node_info, &coord_map, nullptr, deletion_set, false,
-                                &page_ref, read_data);
-    // this->do_pipe_search_blind(point1, 0, params.L, params.beam_width, exp_node_info, &coord_map, nullptr, deletion_set, false,
-    //                            &page_ref, read_data);
-    // LOG(INFO) << "insert search finish";
+    // this->do_ssd_search(point1, 0, params.L, params.beam_width, exp_node_info, &coord_map, nullptr, deletion_set, false,
+    //                     &page_ref, read_data);
+    this->do_ssd_search_node(point1, 0, params.L, params.beam_width, exp_node_info, &coord_map, coord_buf, nullptr,
+                             deletion_set, false, &page_ref);
     // change end
 
     std::vector<uint32_t> new_nhood;
 
-    // change start 修改为lvq页面对应的剪枝方法
     pipeann::prune_neighbors(exp_node_info, new_nhood, params, metric, [this, &coord_map](uint32_t a, uint32_t b) {
-      return this->dist_cmp->compare(coord_map[a], coord_map[b], this->meta_.data_dim);
+      return this->dist_cmp->compare(coord_map[a], coord_map[b], (unsigned) aligned_dim);
     });
-    // change end
 
-    // locs[new_nhood.size()] is the target, locs[0:new_nhood.size() - 1] are the neighbors.
-    // lock the pages to write
-    // aligned_free(coord_buf);
+    aligned_free(coord_buf);
 
     std::set<uint64_t> pages_need_to_read;
 
@@ -152,8 +143,15 @@ namespace pipeann {
       if (point[d] < min_val) min_val = point[d];
       if (point[d] > max_val) max_val = point[d];
     }
-    float step = 0.0f;
+    float step = 1.0f;
+
     step = (max_val - min_val) / 255.0f;
+    // if (max_val <= 255)
+    // {
+    //     min_val = std::min(0.0f, min_val);
+    // } else {
+    //     step = (max_val - min_val) / 255.0f;
+    // }
     for (size_t d = 0; d < meta_.data_dim; ++d) {
       int p_val = std::round((point[d] - min_val) / step);
       p_val = std::max(0, std::min(255, p_val));
@@ -296,7 +294,6 @@ namespace pipeann {
       memcpy(w_nbr_node.coords, r_nbr_node.coords, meta_.data_dim * sizeof(uint8_t));
       memcpy(w_nbr_node.nbrs, nhood.data(), w_nbr_node.nnbrs * sizeof(uint32_t));
     }
-    // LOG(INFO) << "neighbor finish";
 
     std::vector<uint64_t> write_page_ref;
     reader->wbc_write(writes, ctx, &write_page_ref);

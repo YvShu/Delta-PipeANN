@@ -20,3 +20,12 @@ target_link_libraries(gt_update ${PROJECT_NAME} )
 
 add_executable(change_pts change_pts.cpp)
 target_link_libraries(change_pts ${PROJECT_NAME})
+
+add_executable(partition_page partition_page.cpp)
+target_link_libraries(partition_page ${PROJECT_NAME})
+
+add_executable(index_relayout index_relayout.cpp)
+target_link_libraries(index_relayout ${PROJECT_NAME})
+
+add_executable(partition_bamg partition_bamg.cpp)
+target_link_libraries(partition_bamg ${PROJECT_NAME})
